@@ -38,6 +38,8 @@ let adminLoggedInUsers = {};
 let dynamicAdmins = ["918268242769"];
 let pendingAdmins = {};
 let userLang = {};
+let allPatientNumbers = new Set();
+let broadcastMode = {};
 
 let dailyLimit = 50;
 let clinicOpen = true;
@@ -67,7 +69,7 @@ const msg = {
         askPhone:    "Please enter your mobile number",
         askDate:     "Please enter appointment date (example: 12 April)",
         confirmed:   (token) => `Appointment confirmed ✅\nYour token number: *${token}*\n\nTo book again, type *appointment*`,
-        full:        "No appointments available for today ❌",
+        full:        "No appointments available ❌",
         closed:      "Clinic is closed today ❌",
         closedDay:   (d) => `Clinic is closed on ${d} ❌`,
         closedDate:  (d) => `Clinic is closed on ${d} ❌`,
@@ -82,8 +84,18 @@ function t(senderRaw, key, ...args) {
 
 /* ================= QR ================= */
 
+const express = require("express");
+const app = express();
+let lastQR = "";
+app.get("/qr", (req, res) => {
+    if (!lastQR) return res.send("QR abhi nahi aaya, 30 second baad try karo");
+    res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#fff"><img src="https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(lastQR)}" /></body></html>`);
+});
+app.listen(process.env.PORT || 3000);
+
 client.on("qr", qr => {
-    console.log("QR CODE RECEIVED - SCAN THIS:");
+    lastQR = qr;
+    console.log("QR ready - visit /qr");
     qrcode.generate(qr, { small: true });
 });
 client.on("ready", () => { console.log("WhatsApp Bot Ready ✅"); });
@@ -136,6 +148,26 @@ client.on("message", async message => {
 
     cleanOldAppointments();
 
+    // ===== BROADCAST MODE =====
+    if (isAdmin && isLoggedIn && broadcastMode[sender]) {
+        if (text === "ads stop") {
+            broadcastMode[sender] = false;
+            return message.reply("📢 Broadcast mode OFF ✅");
+        }
+        const numbers = Array.from(allPatientNumbers);
+        let sent = 0;
+        let failed = 0;
+        for (const num of numbers) {
+            try {
+                await client.sendMessage(num + "@c.us", message.body);
+                sent++;
+                await new Promise(r => setTimeout(r, 500));
+            } catch (e) { failed++; }
+        }
+        broadcastMode[sender] = false;
+        return message.reply(`📢 Broadcast complete!\n✅ Sent: ${sent}\n❌ Failed: ${failed}\nTotal patients: ${numbers.length}`);
+    }
+
     // ===== JOIN ADMIN =====
     if (text === "join admin") {
         if (checkIsAdmin(sender)) return message.reply("Aap pehle se admin hain ✅");
@@ -149,7 +181,7 @@ client.on("message", async message => {
         const pin = text.split(" ")[1];
         if (pin === ADMIN_PIN) {
             adminLoggedInUsers[sender] = true;
-            let commands = `Admin login successful ✅\n\n📋 *Commands:*\n*list* — aaj ki appointments\n*list full* — aaj + future sab\n*list 12 april* — us din ki appointments\n*history* — last 7 din\n*limit 30* — daily limit change\n*close sunday* — din band\n*close 12 april* — date band\n*open sunday* — din kholo\n*open* — clinic kholo\n*close* — clinic band\n*delete [phone]* — appointment delete\n*delete old* — 7 din purane delete\n*reset* — sab reset`;
+            let commands = `Admin login successful ✅\n\n📋 *Commands:*\n*list* — aaj ki appointments\n*list full* — aaj + future sab\n*list 12 april* — us din ki appointments\n*history* — last 7 din\n*limit 30* — daily limit change\n*close sunday* — din band\n*close 12 april* — date band\n*open sunday* — din kholo\n*open* — clinic kholo\n*close* — clinic band\n*delete [phone]* — appointment delete\n*delete old* — 7 din purane delete\n*reset* — sab reset\n*patients list* — sab saved numbers\n\n📢 *Broadcast:*\n*ads all* — sab patients ko message\n*ads today* — sirf aaj ke patients\n*ads stop* — broadcast band karo`;
             if (isSuperAdmin) commands += "\n\n👑 *Superadmin Commands:*\napprove [number]\ndisapprove [number]\npending\nadmin add [number]\nadmin remove [number]\nadmin list";
             return message.reply(commands);
         }
@@ -199,6 +231,26 @@ client.on("message", async message => {
 
     // ===== ADMIN COMMANDS =====
     if (isAdmin && isLoggedIn) {
+
+        if (text === "ads all") {
+            if (allPatientNumbers.size === 0) return message.reply("Abhi koi patient number saved nahi hai ❌");
+            broadcastMode[sender] = true;
+            return message.reply(`📢 *Broadcast Mode ON*\nTotal patients: ${allPatientNumbers.size}\n\nAb agla message jo bhi likhoge ya forward karoge — sab ${allPatientNumbers.size} patients ko chala jayega!\n\nBand karne ke liye: *ads stop*`);
+        }
+
+        if (text === "ads today") {
+            const todayStr = new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
+            const todayPatients = Object.values(appointments).filter(a => a.date === todayStr).map(a => a.phone);
+            const uniqueToday = [...new Set(todayPatients)];
+            if (uniqueToday.length === 0) return message.reply("Aaj ke koi patients nahi hain ❌");
+            broadcastMode[sender] = true;
+            return message.reply(`📢 *Broadcast Mode ON (Aaj ke patients)*\nTotal: ${uniqueToday.length}\n\nAb agla message aaj ke patients ko jayega!\n\nBand karne ke liye: *ads stop*`);
+        }
+
+        if (text === "patients list") {
+            if (allPatientNumbers.size === 0) return message.reply("Koi patient number nahi hai abhi");
+            return message.reply(`📋 *Total Saved Patients: ${allPatientNumbers.size}*\n\n${Array.from(allPatientNumbers).join("\n")}`);
+        }
 
         if (text === "list") {
             const todayStr = new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
@@ -335,8 +387,10 @@ client.on("message", async message => {
                 token,
                 timestamp: Date.now()
             };
+            allPatientNumbers.add(sender);
+            const confirmMsg = t(senderRaw, "confirmed", token);
             delete userState[senderRaw]; delete userLang[senderRaw];
-            return message.reply(t(senderRaw, "confirmed", token));
+            return message.reply(confirmMsg);
         }
         return;
     }
