@@ -1,35 +1,25 @@
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
+const fs = require("fs");
 
-// ✅ FIX: Render pe Chrome install hota hai is path pe after "npx puppeteer browsers install chrome"
-// Ye path automatically puppeteer ka default cache use karta hai
+// ✅ Chrome path — env variable se lo, ya cache folder scan karo
 function getChromePath() {
-    const possiblePaths = [
-        "/opt/render/.cache/puppeteer/chrome/linux-146.0.7680.153/chrome-linux64/chrome",
-        "/opt/render/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome",
-    ];
-
-    const fs = require("fs");
-    const glob = require("path");
-
-    // Try exact known path first
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+        console.log("✅ Chrome path from env:", process.env.PUPPETEER_EXECUTABLE_PATH);
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
     const basePath = "/opt/render/.cache/puppeteer/chrome";
     if (fs.existsSync(basePath)) {
-        try {
-            const versions = fs.readdirSync(basePath);
-            for (const version of versions) {
-                const chromePath = `${basePath}/${version}/chrome-linux64/chrome`;
-                if (fs.existsSync(chromePath)) {
-                    console.log("✅ Chrome found at:", chromePath);
-                    return chromePath;
-                }
+        const versions = fs.readdirSync(basePath);
+        for (const version of versions) {
+            const chromePath = `${basePath}/${version}/chrome-linux64/chrome`;
+            if (fs.existsSync(chromePath)) {
+                console.log("✅ Chrome found by scan:", chromePath);
+                return chromePath;
             }
-        } catch (e) {
-            console.log("Path scan error:", e.message);
         }
     }
-
-    console.log("⚠️ Chrome not found at cache path, using default");
+    console.log("⚠️ Chrome not found, using default");
     return null;
 }
 
@@ -131,6 +121,24 @@ async function notifySuperAdmin(text) {
     for (const phone of SUPERADMIN_PHONES) { try { await client.sendMessage(phone + "@c.us", text); } catch (e) {} }
 }
 
+// ✅ Date parse helper — "12 april", "12 jan" etc normalize karta hai
+function parseDate(str) {
+    const months = {
+        jan: "january", feb: "february", mar: "march", apr: "april",
+        may: "may", jun: "june", jul: "july", aug: "august",
+        sep: "september", oct: "october", nov: "november", dec: "december",
+        january: "january", february: "february", march: "march", april: "april",
+        june: "june", july: "july", august: "august", september: "september",
+        october: "october", november: "november", december: "december"
+    };
+    const parts = str.toLowerCase().trim().split(" ");
+    if (parts.length < 2) return null;
+    const day = parts[0];
+    const month = months[parts[1]];
+    if (!month) return null;
+    return `${day} ${month}`;
+}
+
 client.on("message", async message => {
     if (message.from.endsWith("@g.us")) return;
 
@@ -144,6 +152,7 @@ client.on("message", async message => {
 
     cleanOldAppointments();
 
+    // ===================== JOIN ADMIN =====================
     if (text === "join admin") {
         if (checkIsAdmin(sender)) return message.reply("Aap pehle se admin hain ✅");
         pendingAdmins[sender] = true;
@@ -151,17 +160,19 @@ client.on("message", async message => {
         return message.reply("Aapki admin request bhej di gayi hai ✅\nSuperadmin ke approve karne ka intezaar karein 🙏");
     }
 
+    // ===================== LOGIN =====================
     if (isAdmin && text.startsWith("login")) {
         const pin = text.split(" ")[1];
         if (pin === ADMIN_PIN) {
             adminLoggedInUsers[sender] = true;
-            let commands = "Admin login successful ✅\n\nCommands:\nlist\nhistory\nlimit 30\nclose sunday\nclose 12 april\nopen sunday\nopen\nclose\nreset";
-            if (isSuperAdmin) commands += "\n\n👑 Superadmin Commands:\napprove [number]\ndisapprove [number]\npending\nadmin add [number]\nadmin remove [number]\nadmin list";
+            let commands = `Admin login successful ✅\n\n📋 *Commands:*\n*list* — aaj ki appointments\n*list full* — aaj + future sab\n*list 12 april* — us din ki appointments\n*history* — last 7 din\n*limit 30* — daily limit change\n*close sunday* — din band\n*close 12 april* — date band\n*open sunday* — din kholo\n*open* — clinic kholo\n*close* — clinic band\n*delete [phone]* — appointment delete\n*delete old* — 7 din purane delete\n*reset* — sab reset`;
+            if (isSuperAdmin) commands += "\n\n👑 *Superadmin Commands:*\napprove [number]\ndisapprove [number]\npending\nadmin add [number]\nadmin remove [number]\nadmin list";
             return message.reply(commands);
         }
         return message.reply("Wrong PIN ❌");
     }
 
+    // ===================== SUPERADMIN COMMANDS =====================
     if (isSuperAdmin && isLoggedIn) {
         if (text.startsWith("approve ")) {
             const num = text.replace("approve ", "").trim();
@@ -203,20 +214,55 @@ client.on("message", async message => {
         }
     }
 
+    // ===================== ADMIN COMMANDS =====================
     if (isAdmin && isLoggedIn) {
+
+        // list — sirf aaj ka
         if (text === "list") {
             const todayStr = new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
             const todayList = Object.values(appointments).filter(a => a.date === todayStr);
-            if (!todayList.length) return message.reply("Aaj ki koi appointment nahi hai");
-            let reply = "📋 Aaj ki Appointments:\n\n";
-            todayList.sort((a, b) => a.token - b.token).forEach(a => { reply += `Token: ${a.token}\nName: ${a.name}\nPhone: ${a.phone}\n\n`; });
+            if (!todayList.length) return message.reply(`Aaj (${todayStr}) ki koi appointment nahi hai`);
+            let reply = `📋 *Aaj ki Appointments (${todayStr}):*\n\n`;
+            todayList.sort((a, b) => a.token - b.token).forEach(a => { reply += `Token: *${a.token}*\nName: ${a.name}\nPhone: ${a.phone}\n\n`; });
             return message.reply(reply);
         }
+
+        // list full — aaj + future sab
+        if (text === "list full") {
+            const today = new Date(); today.setHours(0,0,0,0);
+            const futureList = Object.values(appointments).filter(a => {
+                const d = new Date(a.date + " " + new Date().getFullYear());
+                return d >= today;
+            });
+            if (!futureList.length) return message.reply("Koi upcoming appointment nahi hai");
+            const grouped = {};
+            futureList.forEach(a => { if (!grouped[a.date]) grouped[a.date] = []; grouped[a.date].push(a); });
+            let reply = "📋 *Aaj + Future Appointments:*\n\n";
+            Object.keys(grouped).sort().forEach(date => {
+                reply += `━━━ ${date} ━━━\n`;
+                grouped[date].sort((a, b) => a.token - b.token).forEach(a => { reply += `Token *${a.token}*: ${a.name} (${a.phone})\n`; });
+                reply += "\n";
+            });
+            return message.reply(reply);
+        }
+
+        // list 12 april — specific din
+        if (text.startsWith("list ")) {
+            const dateStr = parseDate(text.replace("list ", "").trim());
+            if (!dateStr) return message.reply("❌ Date galat hai\nExample: list 12 april");
+            const dayList = Object.values(appointments).filter(a => a.date === dateStr);
+            if (!dayList.length) return message.reply(`${dateStr} ki koi appointment nahi hai`);
+            let reply = `📋 *${dateStr} ki Appointments:*\n\n`;
+            dayList.sort((a, b) => a.token - b.token).forEach(a => { reply += `Token: *${a.token}*\nName: ${a.name}\nPhone: ${a.phone}\n\n`; });
+            return message.reply(reply);
+        }
+
+        // history — last 7 din
         if (text === "history") {
             if (!Object.keys(appointments).length) return message.reply("Koi appointment nahi mili (7 din mein)");
             const grouped = {};
             Object.values(appointments).forEach(a => { if (!grouped[a.date]) grouped[a.date] = []; grouped[a.date].push(a); });
-            let reply = "📅 Last 7 Days:\n\n";
+            let reply = "📅 *Last 7 Days:*\n\n";
             Object.keys(grouped).sort().forEach(date => {
                 reply += `━━━ ${date} ━━━\n`;
                 grouped[date].sort((a, b) => a.token - b.token).forEach(a => { reply += `Token ${a.token}: ${a.name} (${a.phone})\n`; });
@@ -224,13 +270,36 @@ client.on("message", async message => {
             });
             return message.reply(reply);
         }
+
+        // delete old — 7 din purane delete
+        if (text === "delete old") {
+            const before = Object.keys(appointments).length;
+            cleanOldAppointments();
+            const after = Object.keys(appointments).length;
+            return message.reply(`${before - after} purani appointments delete ho gayi ✅`);
+        }
+
+        // delete [phone] — specific appointment delete
+        if (text.startsWith("delete ")) {
+            const phone = text.replace("delete ", "").trim();
+            const keys = Object.keys(appointments).filter(k => k.startsWith(phone));
+            if (!keys.length) return message.reply(`${phone} ki koi appointment nahi mili ❌`);
+            keys.forEach(k => delete appointments[k]);
+            return message.reply(`${phone} ki appointment(s) delete ho gayi ✅`);
+        }
+
+        // reset
         if (text === "reset") { tokenCounter = {}; appointments = {}; return message.reply("Tokens reset successfully ✅"); }
+
+        // limit
         if (text.startsWith("limit")) {
             const newLimit = parseInt(text.split(" ")[1]);
             if (!newLimit) return message.reply("Invalid number");
             dailyLimit = newLimit;
-            return message.reply(`Daily limit set to ${dailyLimit}`);
+            return message.reply(`Daily limit set to ${dailyLimit} ✅`);
         }
+
+        // close/open
         if (text.startsWith("close ")) {
             const value = text.replace("close ", "").trim();
             if (value.match(/[0-9]/)) { closedDates.push(value); return message.reply(`${value} closed ❌`); }
@@ -248,6 +317,7 @@ client.on("message", async message => {
         return;
     }
 
+    // ===================== USER FLOW =====================
     if (!clinicOpen) return message.reply(t(senderRaw, "closed"));
 
     const today = new Date();
@@ -264,16 +334,34 @@ client.on("message", async message => {
     }
 
     if (userState[senderRaw] && userState[senderRaw].step >= 1) {
-        if (userState[senderRaw].step === 1) { userState[senderRaw].name = message.body; userState[senderRaw].step = 2; return message.reply(t(senderRaw, 'askPhone')); }
-        if (userState[senderRaw].step === 2) { userState[senderRaw].phone = message.body; userState[senderRaw].step = 3; return message.reply(t(senderRaw, 'askDate')); }
+        if (userState[senderRaw].step === 1) {
+            userState[senderRaw].name = message.body;
+            userState[senderRaw].step = 2;
+            return message.reply(t(senderRaw, 'askPhone'));
+        }
+        if (userState[senderRaw].step === 2) {
+            userState[senderRaw].phone = message.body;
+            userState[senderRaw].step = 3;
+            return message.reply(t(senderRaw, 'askDate'));
+        }
         if (userState[senderRaw].step === 3) {
-            const date = new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long' }).toLowerCase();
-            if (!tokenCounter[date]) tokenCounter[date] = 1;
-            if (tokenCounter[date] > dailyLimit) { delete userState[senderRaw]; delete userLang[senderRaw]; return message.reply(t(senderRaw, 'full')); }
-            const token = tokenCounter[date]++;
+            const requestedDate = message.body.trim().toLowerCase();
+            const parsedDate = parseDate(requestedDate);
+            const saveDate = parsedDate || new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long' }).toLowerCase();
+
+            if (!tokenCounter[saveDate]) tokenCounter[saveDate] = 1;
+            if (tokenCounter[saveDate] > dailyLimit) {
+                delete userState[senderRaw];
+                delete userLang[senderRaw];
+                return message.reply(t(senderRaw, 'full'));
+            }
+            const token = tokenCounter[saveDate]++;
             appointments[userState[senderRaw].phone + '_' + Date.now()] = {
-                name: userState[senderRaw].name, phone: userState[senderRaw].phone,
-                date, token, timestamp: Date.now()
+                name: userState[senderRaw].name,
+                phone: userState[senderRaw].phone,
+                date: saveDate,
+                token,
+                timestamp: Date.now()
             };
             delete userState[senderRaw];
             delete userLang[senderRaw];
