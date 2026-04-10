@@ -1,23 +1,41 @@
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
-const puppeteer = require("puppeteer");
 
-// Dynamic Chrome path — Render pe automatically sahi path milega
-async function getChromePath() {
-    try {
-        const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox"] });
-        const path = browser.process().spawnfile;
-        await browser.close();
-        return path;
-    } catch (e) {
-        console.log("Chrome auto-detect failed, using default:", e.message);
-        return null;
+// ✅ FIX: Render pe Chrome install hota hai is path pe after "npx puppeteer browsers install chrome"
+// Ye path automatically puppeteer ka default cache use karta hai
+function getChromePath() {
+    const possiblePaths = [
+        "/opt/render/.cache/puppeteer/chrome/linux-146.0.7680.153/chrome-linux64/chrome",
+        "/opt/render/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome",
+    ];
+
+    const fs = require("fs");
+    const glob = require("path");
+
+    // Try exact known path first
+    const basePath = "/opt/render/.cache/puppeteer/chrome";
+    if (fs.existsSync(basePath)) {
+        try {
+            const versions = fs.readdirSync(basePath);
+            for (const version of versions) {
+                const chromePath = `${basePath}/${version}/chrome-linux64/chrome`;
+                if (fs.existsSync(chromePath)) {
+                    console.log("✅ Chrome found at:", chromePath);
+                    return chromePath;
+                }
+            }
+        } catch (e) {
+            console.log("Path scan error:", e.message);
+        }
     }
+
+    console.log("⚠️ Chrome not found at cache path, using default");
+    return null;
 }
 
 async function startBot() {
 
-    const chromePath = await getChromePath();
+    const chromePath = getChromePath();
     console.log("Chrome path detected:", chromePath);
 
     const client = new Client({
