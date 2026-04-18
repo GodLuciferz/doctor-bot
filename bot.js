@@ -2,25 +2,49 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const fs = require("fs");
 
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--single-process",
-            "--disable-gpu",
-            "--disable-extensions",
-            "--disable-software-rasterizer",
-            "--ignore-certificate-errors"
-        ]
+// ✅ Chrome path — env variable se lo, ya cache folder scan karo
+function getChromePath() {
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+        console.log("✅ Chrome path from env:", process.env.PUPPETEER_EXECUTABLE_PATH);
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
     }
-});
+    const basePath = "/opt/render/.cache/puppeteer/chrome";
+    if (fs.existsSync(basePath)) {
+        const versions = fs.readdirSync(basePath);
+        for (const version of versions) {
+            const chromePath = `${basePath}/${version}/chrome-linux64/chrome`;
+            if (fs.existsSync(chromePath)) {
+                console.log("✅ Chrome found by scan:", chromePath);
+                return chromePath;
+            }
+        }
+    }
+    console.log("⚠️ Chrome not found, using default");
+    return null;
+}
+
+async function startBot() {
+
+    const chromePath = getChromePath();
+    console.log("Chrome path detected:", chromePath);
+
+    const client = new Client({
+        authStrategy: new LocalAuth(),
+        puppeteer: {
+            headless: true,
+            ...(chromePath && { executablePath: chromePath }),
+            args: [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-accelerated-2d-canvas",
+                "--no-first-run",
+                "--no-zygote",
+                "--single-process",
+                "--disable-gpu"
+            ]
+        }
+    });
 
 /* ================= SETTINGS ================= */
 
@@ -38,8 +62,6 @@ let adminLoggedInUsers = {};
 let dynamicAdmins = ["918268242769"];
 let pendingAdmins = {};
 let userLang = {};
-let allPatientNumbers = new Set();
-let broadcastMode = {};
 
 let dailyLimit = 50;
 let clinicOpen = true;
@@ -69,7 +91,7 @@ const msg = {
         askPhone:    "Please enter your mobile number",
         askDate:     "Please enter appointment date (example: 12 April)",
         confirmed:   (token) => `Appointment confirmed ✅\nYour token number: *${token}*\n\nTo book again, type *appointment*`,
-        full:        "No appointments available ❌",
+        full:        "No appointments available for today ❌",
         closed:      "Clinic is closed today ❌",
         closedDay:   (d) => `Clinic is closed on ${d} ❌`,
         closedDate:  (d) => `Clinic is closed on ${d} ❌`,
@@ -82,25 +104,8 @@ function t(senderRaw, key, ...args) {
     return typeof val === "function" ? val(...args) : val;
 }
 
-/* ================= QR ================= */
-
-const express = require("express");
-const app = express();
-let lastQR = "";
-app.get("/qr", (req, res) => {
-    if (!lastQR) return res.send("QR abhi nahi aaya, 30 second baad try karo");
-    res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#fff"><img src="https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(lastQR)}" /></body></html>`);
-});
-app.listen(process.env.PORT || 3000);
-
-client.on("qr", qr => {
-    lastQR = qr;
-    console.log("QR ready - visit /qr");
-    qrcode.generate(qr, { small: true });
-});
+client.on("qr", qr => { qrcode.generate(qr, { small: true }); });
 client.on("ready", () => { console.log("WhatsApp Bot Ready ✅"); });
-
-/* ================= HELPERS ================= */
 
 function getPhoneNumber(senderId) { return senderId.replace(/@.+/, "").trim(); }
 function checkIsSuperAdmin(sender) { return SUPERADMIN_PHONES.some(s => sender.includes(s) || s.includes(sender)); }
@@ -116,6 +121,7 @@ async function notifySuperAdmin(text) {
     for (const phone of SUPERADMIN_PHONES) { try { await client.sendMessage(phone + "@c.us", text); } catch (e) {} }
 }
 
+// ✅ Date parse helper — "12 april", "12 jan" etc normalize karta hai
 function parseDate(str) {
     const months = {
         jan: "january", feb: "february", mar: "march", apr: "april",
@@ -133,8 +139,6 @@ function parseDate(str) {
     return `${day} ${month}`;
 }
 
-/* ================= MAIN ================= */
-
 client.on("message", async message => {
     if (message.from.endsWith("@g.us")) return;
 
@@ -148,27 +152,7 @@ client.on("message", async message => {
 
     cleanOldAppointments();
 
-    // ===== BROADCAST MODE =====
-    if (isAdmin && isLoggedIn && broadcastMode[sender]) {
-        if (text === "ads stop") {
-            broadcastMode[sender] = false;
-            return message.reply("📢 Broadcast mode OFF ✅");
-        }
-        const numbers = Array.from(allPatientNumbers);
-        let sent = 0;
-        let failed = 0;
-        for (const num of numbers) {
-            try {
-                await client.sendMessage(num + "@c.us", message.body);
-                sent++;
-                await new Promise(r => setTimeout(r, 500));
-            } catch (e) { failed++; }
-        }
-        broadcastMode[sender] = false;
-        return message.reply(`📢 Broadcast complete!\n✅ Sent: ${sent}\n❌ Failed: ${failed}\nTotal patients: ${numbers.length}`);
-    }
-
-    // ===== JOIN ADMIN =====
+    // ===================== JOIN ADMIN =====================
     if (text === "join admin") {
         if (checkIsAdmin(sender)) return message.reply("Aap pehle se admin hain ✅");
         pendingAdmins[sender] = true;
@@ -176,19 +160,19 @@ client.on("message", async message => {
         return message.reply("Aapki admin request bhej di gayi hai ✅\nSuperadmin ke approve karne ka intezaar karein 🙏");
     }
 
-    // ===== LOGIN =====
+    // ===================== LOGIN =====================
     if (isAdmin && text.startsWith("login")) {
         const pin = text.split(" ")[1];
         if (pin === ADMIN_PIN) {
             adminLoggedInUsers[sender] = true;
-            let commands = `Admin login successful ✅\n\n📋 *Commands:*\n*list* — aaj ki appointments\n*list full* — aaj + future sab\n*list 12 april* — us din ki appointments\n*history* — last 7 din\n*limit 30* — daily limit change\n*close sunday* — din band\n*close 12 april* — date band\n*open sunday* — din kholo\n*open* — clinic kholo\n*close* — clinic band\n*delete [phone]* — appointment delete\n*delete old* — 7 din purane delete\n*reset* — sab reset\n*patients list* — sab saved numbers\n\n📢 *Broadcast:*\n*ads all* — sab patients ko message\n*ads today* — sirf aaj ke patients\n*ads stop* — broadcast band karo`;
+            let commands = `Admin login successful ✅\n\n📋 *Commands:*\n*list* — aaj ki appointments\n*list full* — aaj + future sab\n*list 12 april* — us din ki appointments\n*history* — last 7 din\n*limit 30* — daily limit change\n*close sunday* — din band\n*close 12 april* — date band\n*open sunday* — din kholo\n*open* — clinic kholo\n*close* — clinic band\n*delete [phone]* — appointment delete\n*delete old* — 7 din purane delete\n*reset* — sab reset`;
             if (isSuperAdmin) commands += "\n\n👑 *Superadmin Commands:*\napprove [number]\ndisapprove [number]\npending\nadmin add [number]\nadmin remove [number]\nadmin list";
             return message.reply(commands);
         }
         return message.reply("Wrong PIN ❌");
     }
 
-    // ===== SUPERADMIN COMMANDS =====
+    // ===================== SUPERADMIN COMMANDS =====================
     if (isSuperAdmin && isLoggedIn) {
         if (text.startsWith("approve ")) {
             const num = text.replace("approve ", "").trim();
@@ -206,7 +190,8 @@ client.on("message", async message => {
         }
         if (text === "pending") {
             const list = Object.keys(pendingAdmins);
-            return message.reply(list.length ? `Pending requests:\n${list.join("\n")}` : "Koi pending request nahi hai");
+            if (!list.length) return message.reply("Koi pending request nahi hai");
+            return message.reply("⏳ Pending Requests:\n\n" + list.map(n => `• ${n}`).join("\n"));
         }
         if (text.startsWith("admin add ")) {
             const newAdmin = text.replace("admin add ", "").trim();
@@ -229,29 +214,10 @@ client.on("message", async message => {
         }
     }
 
-    // ===== ADMIN COMMANDS =====
+    // ===================== ADMIN COMMANDS =====================
     if (isAdmin && isLoggedIn) {
 
-        if (text === "ads all") {
-            if (allPatientNumbers.size === 0) return message.reply("Abhi koi patient number saved nahi hai ❌");
-            broadcastMode[sender] = true;
-            return message.reply(`📢 *Broadcast Mode ON*\nTotal patients: ${allPatientNumbers.size}\n\nAb agla message jo bhi likhoge ya forward karoge — sab ${allPatientNumbers.size} patients ko chala jayega!\n\nBand karne ke liye: *ads stop*`);
-        }
-
-        if (text === "ads today") {
-            const todayStr = new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
-            const todayPatients = Object.values(appointments).filter(a => a.date === todayStr).map(a => a.phone);
-            const uniqueToday = [...new Set(todayPatients)];
-            if (uniqueToday.length === 0) return message.reply("Aaj ke koi patients nahi hain ❌");
-            broadcastMode[sender] = true;
-            return message.reply(`📢 *Broadcast Mode ON (Aaj ke patients)*\nTotal: ${uniqueToday.length}\n\nAb agla message aaj ke patients ko jayega!\n\nBand karne ke liye: *ads stop*`);
-        }
-
-        if (text === "patients list") {
-            if (allPatientNumbers.size === 0) return message.reply("Koi patient number nahi hai abhi");
-            return message.reply(`📋 *Total Saved Patients: ${allPatientNumbers.size}*\n\n${Array.from(allPatientNumbers).join("\n")}`);
-        }
-
+        // list — sirf aaj ka
         if (text === "list") {
             const todayStr = new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
             const todayList = Object.values(appointments).filter(a => a.date === todayStr);
@@ -261,6 +227,7 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
+        // list full — aaj + future sab
         if (text === "list full") {
             const today = new Date(); today.setHours(0,0,0,0);
             const futureList = Object.values(appointments).filter(a => {
@@ -279,6 +246,7 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
+        // list 12 april — specific din
         if (text.startsWith("list ")) {
             const dateStr = parseDate(text.replace("list ", "").trim());
             if (!dateStr) return message.reply("❌ Date galat hai\nExample: list 12 april");
@@ -289,6 +257,7 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
+        // history — last 7 din
         if (text === "history") {
             if (!Object.keys(appointments).length) return message.reply("Koi appointment nahi mili (7 din mein)");
             const grouped = {};
@@ -302,6 +271,7 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
+        // delete old — 7 din purane delete
         if (text === "delete old") {
             const before = Object.keys(appointments).length;
             cleanOldAppointments();
@@ -309,6 +279,7 @@ client.on("message", async message => {
             return message.reply(`${before - after} purani appointments delete ho gayi ✅`);
         }
 
+        // delete [phone] — specific appointment delete
         if (text.startsWith("delete ")) {
             const phone = text.replace("delete ", "").trim();
             const keys = Object.keys(appointments).filter(k => k.startsWith(phone));
@@ -317,8 +288,10 @@ client.on("message", async message => {
             return message.reply(`${phone} ki appointment(s) delete ho gayi ✅`);
         }
 
+        // reset
         if (text === "reset") { tokenCounter = {}; appointments = {}; return message.reply("Tokens reset successfully ✅"); }
 
+        // limit
         if (text.startsWith("limit")) {
             const newLimit = parseInt(text.split(" ")[1]);
             if (!newLimit) return message.reply("Invalid number");
@@ -326,6 +299,7 @@ client.on("message", async message => {
             return message.reply(`Daily limit set to ${dailyLimit} ✅`);
         }
 
+        // close/open
         if (text.startsWith("close ")) {
             const value = text.replace("close ", "").trim();
             if (value.match(/[0-9]/)) { closedDates.push(value); return message.reply(`${value} closed ❌`); }
@@ -343,7 +317,7 @@ client.on("message", async message => {
         return;
     }
 
-    // ===== USER FLOW =====
+    // ===================== USER FLOW =====================
     if (!clinicOpen) return message.reply(t(senderRaw, "closed"));
 
     const today = new Date();
@@ -354,8 +328,8 @@ client.on("message", async message => {
     if (closedDates.includes(todayDate)) return message.reply(t(senderRaw, "closedDate", todayDate));
 
     if (userState[senderRaw] && userState[senderRaw].step === 0) {
-        if (text === "hindi") { userLang[senderRaw] = "hi"; userState[senderRaw] = { step: 1 }; return message.reply(msg.hi.welcome); }
-        if (text === "english") { userLang[senderRaw] = "en"; userState[senderRaw] = { step: 1 }; return message.reply(msg.en.welcome); }
+        if (text === 'hindi') { userLang[senderRaw] = 'hi'; userState[senderRaw] = { step: 1 }; return message.reply(msg.hi.welcome); }
+        if (text === 'english') { userLang[senderRaw] = 'en'; userState[senderRaw] = { step: 1 }; return message.reply(msg.en.welcome); }
         return message.reply(msg.hi.selectLang);
     }
 
@@ -363,34 +337,35 @@ client.on("message", async message => {
         if (userState[senderRaw].step === 1) {
             userState[senderRaw].name = message.body;
             userState[senderRaw].step = 2;
-            return message.reply(t(senderRaw, "askPhone"));
+            return message.reply(t(senderRaw, 'askPhone'));
         }
         if (userState[senderRaw].step === 2) {
             userState[senderRaw].phone = message.body;
             userState[senderRaw].step = 3;
-            return message.reply(t(senderRaw, "askDate"));
+            return message.reply(t(senderRaw, 'askDate'));
         }
         if (userState[senderRaw].step === 3) {
             const requestedDate = message.body.trim().toLowerCase();
             const parsedDate = parseDate(requestedDate);
-            const saveDate = parsedDate || new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
+            const saveDate = parsedDate || new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long' }).toLowerCase();
+
             if (!tokenCounter[saveDate]) tokenCounter[saveDate] = 1;
             if (tokenCounter[saveDate] > dailyLimit) {
-                delete userState[senderRaw]; delete userLang[senderRaw];
-                return message.reply(t(senderRaw, "full"));
+                delete userState[senderRaw];
+                delete userLang[senderRaw];
+                return message.reply(t(senderRaw, 'full'));
             }
             const token = tokenCounter[saveDate]++;
-            appointments[userState[senderRaw].phone + "_" + Date.now()] = {
+            appointments[userState[senderRaw].phone + '_' + Date.now()] = {
                 name: userState[senderRaw].name,
                 phone: userState[senderRaw].phone,
                 date: saveDate,
                 token,
                 timestamp: Date.now()
             };
-            allPatientNumbers.add(sender);
-            const confirmMsg = t(senderRaw, "confirmed", token);
-            delete userState[senderRaw]; delete userLang[senderRaw];
-            return message.reply(confirmMsg);
+            delete userState[senderRaw];
+            delete userLang[senderRaw];
+            return message.reply(t(senderRaw, 'confirmed', token));
         }
         return;
     }
@@ -398,6 +373,7 @@ client.on("message", async message => {
     if (isTriggerWord(text)) { userState[senderRaw] = { step: 0 }; return message.reply(msg.hi.selectLang); }
 });
 
-client.initialize();
+    client.initialize();
+}
 
-module.exports = client;
+startBot();
