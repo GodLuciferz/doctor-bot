@@ -1,6 +1,22 @@
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const fs = require("fs");
+const express = require("express");
+
+// ✅ Express server — Render ke liye port bind zaroori hai
+const app = express();
+let lastQR = "";
+
+app.get("/", (req, res) => res.send("Doctor Bot is running ✅"));
+app.get("/qr", async (req, res) => {
+    if (!lastQR) return res.send("<h2>QR not ready yet — wait 10 seconds and refresh</h2>");
+    const QRCode = require("qrcode");
+    const qrImage = await QRCode.toDataURL(lastQR);
+    res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#111">
+        <img src="${qrImage}" style="width:300px;height:300px"/>
+        </body></html>`);
+});
+app.listen(process.env.PORT || 3000, () => console.log("✅ Express server running"));
 
 // ✅ Chrome path — env variable se lo, ya cache folder scan karo
 function getChromePath() {
@@ -8,7 +24,7 @@ function getChromePath() {
         console.log("✅ Chrome path from env:", process.env.PUPPETEER_EXECUTABLE_PATH);
         return process.env.PUPPETEER_EXECUTABLE_PATH;
     }
-    const basePath = "/opt/render/.cache/puppeteer/chrome";
+    const basePath = "/opt/render/project/src/.chrome/chrome";
     if (fs.existsSync(basePath)) {
         const versions = fs.readdirSync(basePath);
         for (const version of versions) {
@@ -40,7 +56,6 @@ async function startBot() {
                 "--disable-accelerated-2d-canvas",
                 "--no-first-run",
                 "--no-zygote",
-                "--single-process",
                 "--disable-gpu"
             ]
         }
@@ -104,13 +119,17 @@ function t(senderRaw, key, ...args) {
     return typeof val === "function" ? val(...args) : val;
 }
 
-const QRCode = require("qrcode");
-client.on("qr", async qr => {
+// ✅ QR — browser mein dikhega /qr pe
+client.on("qr", qr => {
+    lastQR = qr;
     qrcode.generate(qr, { small: true });
-    await QRCode.toFile("qr.png", qr);
-    console.log("✅ QR saved as qr.png — open Render logs to download");
+    console.log("✅ QR ready — open /qr URL to scan");
 });
-client.on("ready", () => { console.log("WhatsApp Bot Ready ✅"); });
+
+client.on("ready", () => {
+    lastQR = "";
+    console.log("WhatsApp Bot Ready ✅");
+});
 
 function getPhoneNumber(senderId) { return senderId.replace(/@.+/, "").trim(); }
 function checkIsSuperAdmin(sender) { return SUPERADMIN_PHONES.some(s => sender.includes(s) || s.includes(sender)); }
@@ -222,7 +241,6 @@ client.on("message", async message => {
     // ===================== ADMIN COMMANDS =====================
     if (isAdmin && isLoggedIn) {
 
-        // list — sirf aaj ka
         if (text === "list") {
             const todayStr = new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
             const todayList = Object.values(appointments).filter(a => a.date === todayStr);
@@ -232,7 +250,6 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
-        // list full — aaj + future sab
         if (text === "list full") {
             const today = new Date(); today.setHours(0,0,0,0);
             const futureList = Object.values(appointments).filter(a => {
@@ -251,7 +268,6 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
-        // list 12 april — specific din
         if (text.startsWith("list ")) {
             const dateStr = parseDate(text.replace("list ", "").trim());
             if (!dateStr) return message.reply("❌ Date galat hai\nExample: list 12 april");
@@ -262,7 +278,6 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
-        // history
         if (text === "history") {
             if (!Object.keys(appointments).length) return message.reply("Koi appointment nahi mili (7 din mein)");
             const grouped = {};
@@ -276,7 +291,6 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
-        // delete old
         if (text === "delete old") {
             const before = Object.keys(appointments).length;
             cleanOldAppointments();
@@ -284,7 +298,6 @@ client.on("message", async message => {
             return message.reply(`${before - after} purani appointments delete ho gayi ✅`);
         }
 
-        // delete [phone]
         if (text.startsWith("delete ")) {
             const phone = text.replace("delete ", "").trim();
             const keys = Object.keys(appointments).filter(k => k.startsWith(phone));
@@ -293,10 +306,8 @@ client.on("message", async message => {
             return message.reply(`${phone} ki appointment(s) delete ho gayi ✅`);
         }
 
-        // reset
         if (text === "reset") { tokenCounter = {}; appointments = {}; return message.reply("Tokens reset successfully ✅"); }
 
-        // limit
         if (text.startsWith("limit")) {
             const newLimit = parseInt(text.split(" ")[1]);
             if (!newLimit) return message.reply("Invalid number");
@@ -304,7 +315,6 @@ client.on("message", async message => {
             return message.reply(`Daily limit set to ${dailyLimit} ✅`);
         }
 
-        // close/open
         if (text.startsWith("close ")) {
             const value = text.replace("close ", "").trim();
             if (value.match(/[0-9]/)) { closedDates.push(value); return message.reply(`${value} closed ❌`); }
