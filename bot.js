@@ -104,7 +104,12 @@ function t(senderRaw, key, ...args) {
     return typeof val === "function" ? val(...args) : val;
 }
 
-client.on("qr", qr => { qrcode.generate(qr, { small: true }); });
+const QRCode = require("qrcode");
+client.on("qr", async qr => {
+    qrcode.generate(qr, { small: true });
+    await QRCode.toFile("qr.png", qr);
+    console.log("✅ QR saved as qr.png — open Render logs to download");
+});
 client.on("ready", () => { console.log("WhatsApp Bot Ready ✅"); });
 
 function getPhoneNumber(senderId) { return senderId.replace(/@.+/, "").trim(); }
