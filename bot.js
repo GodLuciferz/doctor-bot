@@ -121,7 +121,7 @@ async function notifySuperAdmin(text) {
     for (const phone of SUPERADMIN_PHONES) { try { await client.sendMessage(phone + "@c.us", text); } catch (e) {} }
 }
 
-// ✅ Date parse helper — "12 april", "12 jan" etc normalize karta hai
+// ✅ Date parse helper
 function parseDate(str) {
     const months = {
         jan: "january", feb: "february", mar: "march", apr: "april",
@@ -257,7 +257,7 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
-        // history — last 7 din
+        // history
         if (text === "history") {
             if (!Object.keys(appointments).length) return message.reply("Koi appointment nahi mili (7 din mein)");
             const grouped = {};
@@ -271,7 +271,7 @@ client.on("message", async message => {
             return message.reply(reply);
         }
 
-        // delete old — 7 din purane delete
+        // delete old
         if (text === "delete old") {
             const before = Object.keys(appointments).length;
             cleanOldAppointments();
@@ -279,7 +279,7 @@ client.on("message", async message => {
             return message.reply(`${before - after} purani appointments delete ho gayi ✅`);
         }
 
-        // delete [phone] — specific appointment delete
+        // delete [phone]
         if (text.startsWith("delete ")) {
             const phone = text.replace("delete ", "").trim();
             const keys = Object.keys(appointments).filter(k => k.startsWith(phone));
