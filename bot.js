@@ -1,65 +1,22 @@
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const qrcode = require("qrcode-terminal");
-const fs = require("fs");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
+const { Boom } = require("@hapi/boom");
+const QRCode = require("qrcode");
 const express = require("express");
+const fs = require("fs");
 
-// ✅ Express server — Render ke liye port bind zaroori hai
+// ✅ Express server
 const app = express();
 let lastQR = "";
 
 app.get("/", (req, res) => res.send("Doctor Bot is running ✅"));
 app.get("/qr", async (req, res) => {
-    if (!lastQR) return res.send("<h2>QR not ready yet — wait 10 seconds and refresh</h2>");
-    const QRCode = require("qrcode");
+    if (!lastQR) return res.send("<h2>QR not ready — Bot already connected OR wait 10 seconds and refresh</h2>");
     const qrImage = await QRCode.toDataURL(lastQR);
     res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#111">
         <img src="${qrImage}" style="width:300px;height:300px"/>
         </body></html>`);
 });
 app.listen(process.env.PORT || 3000, () => console.log("✅ Express server running"));
-
-// ✅ Chrome path — env variable se lo, ya cache folder scan karo
-function getChromePath() {
-    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-        console.log("✅ Chrome path from env:", process.env.PUPPETEER_EXECUTABLE_PATH);
-        return process.env.PUPPETEER_EXECUTABLE_PATH;
-    }
-    const basePath = "/opt/render/project/src/.chrome/chrome";
-    if (fs.existsSync(basePath)) {
-        const versions = fs.readdirSync(basePath);
-        for (const version of versions) {
-            const chromePath = `${basePath}/${version}/chrome-linux64/chrome`;
-            if (fs.existsSync(chromePath)) {
-                console.log("✅ Chrome found by scan:", chromePath);
-                return chromePath;
-            }
-        }
-    }
-    console.log("⚠️ Chrome not found, using default");
-    return null;
-}
-
-async function startBot() {
-
-    const chromePath = getChromePath();
-    console.log("Chrome path detected:", chromePath);
-
-    const client = new Client({
-        authStrategy: new LocalAuth(),
-        puppeteer: {
-            headless: true,
-            ...(chromePath && { executablePath: chromePath }),
-            args: [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-accelerated-2d-canvas",
-                "--no-first-run",
-                "--no-zygote",
-                "--disable-gpu"
-            ]
-        }
-    });
 
 /* ================= SETTINGS ================= */
 
@@ -119,19 +76,7 @@ function t(senderRaw, key, ...args) {
     return typeof val === "function" ? val(...args) : val;
 }
 
-// ✅ QR — browser mein dikhega /qr pe
-client.on("qr", qr => {
-    lastQR = qr;
-    qrcode.generate(qr, { small: true });
-    console.log("✅ QR ready — open /qr URL to scan");
-});
-
-client.on("ready", () => {
-    lastQR = "";
-    console.log("WhatsApp Bot Ready ✅");
-});
-
-function getPhoneNumber(senderId) { return senderId.replace(/@.+/, "").trim(); }
+function getPhoneNumber(jid) { return jid.replace(/@.+/, "").trim(); }
 function checkIsSuperAdmin(sender) { return SUPERADMIN_PHONES.some(s => sender.includes(s) || s.includes(sender)); }
 function checkIsAdmin(sender) { if (checkIsSuperAdmin(sender)) return true; return dynamicAdmins.some(a => sender.includes(a) || a.includes(sender)); }
 function isTriggerWord(text) { return triggerWords.includes(text); }
@@ -141,11 +86,6 @@ function cleanOldAppointments() {
     Object.keys(appointments).forEach(key => { if (appointments[key].timestamp < sevenDaysAgo) delete appointments[key]; });
 }
 
-async function notifySuperAdmin(text) {
-    for (const phone of SUPERADMIN_PHONES) { try { await client.sendMessage(phone + "@c.us", text); } catch (e) {} }
-}
-
-// ✅ Date parse helper
 function parseDate(str) {
     const months = {
         jan: "january", feb: "february", mar: "march", apr: "april",
@@ -163,232 +103,270 @@ function parseDate(str) {
     return `${day} ${month}`;
 }
 
-client.on("message", async message => {
-    if (message.from.endsWith("@g.us")) return;
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+    const { version } = await fetchLatestBaileysVersion();
 
-    const senderRaw = message.from;
-    const sender = getPhoneNumber(senderRaw);
-    const text = message.body.toLowerCase().trim();
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: true,
+        browser: ["Doctor Bot", "Chrome", "1.0.0"],
+    });
 
-    const isSuperAdmin = checkIsSuperAdmin(sender);
-    const isAdmin = checkIsAdmin(sender);
-    const isLoggedIn = adminLoggedInUsers[sender];
+    sock.ev.on("creds.update", saveCreds);
 
-    cleanOldAppointments();
+    sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+        if (qr) {
+            lastQR = qr;
+            console.log("✅ QR ready — open /qr URL to scan");
+        }
+        if (connection === "close") {
+            lastQR = "";
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log("Connection closed — reconnecting:", shouldReconnect);
+            if (shouldReconnect) startBot();
+        }
+        if (connection === "open") {
+            lastQR = "";
+            console.log("✅ WhatsApp Bot Connected!");
+        }
+    });
 
-    // ===================== JOIN ADMIN =====================
-    if (text === "join admin") {
-        if (checkIsAdmin(sender)) return message.reply("Aap pehle se admin hain ✅");
-        pendingAdmins[sender] = true;
-        await notifySuperAdmin(`🔔 *New Admin Request*\nNumber: ${sender}\n\nApprove:\napprove ${sender}\n\nReject:\ndisapprove ${sender}`);
-        return message.reply("Aapki admin request bhej di gayi hai ✅\nSuperadmin ke approve karne ka intezaar karein 🙏");
+    async function sendMessage(jid, text) {
+        await sock.sendMessage(jid, { text });
     }
 
-    // ===================== LOGIN =====================
-    if (isAdmin && text.startsWith("login")) {
-        const pin = text.split(" ")[1];
-        if (pin === ADMIN_PIN) {
-            adminLoggedInUsers[sender] = true;
-            let commands = `Admin login successful ✅\n\n📋 *Commands:*\n*list* — aaj ki appointments\n*list full* — aaj + future sab\n*list 12 april* — us din ki appointments\n*history* — last 7 din\n*limit 30* — daily limit change\n*close sunday* — din band\n*close 12 april* — date band\n*open sunday* — din kholo\n*open* — clinic kholo\n*close* — clinic band\n*delete [phone]* — appointment delete\n*delete old* — 7 din purane delete\n*reset* — sab reset`;
-            if (isSuperAdmin) commands += "\n\n👑 *Superadmin Commands:*\napprove [number]\ndisapprove [number]\npending\nadmin add [number]\nadmin remove [number]\nadmin list";
-            return message.reply(commands);
-        }
-        return message.reply("Wrong PIN ❌");
-    }
-
-    // ===================== SUPERADMIN COMMANDS =====================
-    if (isSuperAdmin && isLoggedIn) {
-        if (text.startsWith("approve ")) {
-            const num = text.replace("approve ", "").trim();
-            if (!pendingAdmins[num]) return message.reply(`${num} ki koi pending request nahi hai`);
-            dynamicAdmins.push(num);
-            delete pendingAdmins[num];
-            try { await client.sendMessage(num + "@c.us", "🎉 Aapki admin request approve ho gayi!\nAb *login 1234* likh ke admin panel use karein."); } catch (e) {}
-            return message.reply(`${num} ko admin bana diya gaya ✅`);
-        }
-        if (text.startsWith("disapprove ")) {
-            const num = text.replace("disapprove ", "").trim();
-            delete pendingAdmins[num];
-            try { await client.sendMessage(num + "@c.us", "❌ Aapki admin request reject kar di gayi."); } catch (e) {}
-            return message.reply(`${num} ki request reject kar di gayi ❌`);
-        }
-        if (text === "pending") {
-            const list = Object.keys(pendingAdmins);
-            if (!list.length) return message.reply("Koi pending request nahi hai");
-            return message.reply("⏳ Pending Requests:\n\n" + list.map(n => `• ${n}`).join("\n"));
-        }
-        if (text.startsWith("admin add ")) {
-            const newAdmin = text.replace("admin add ", "").trim();
-            if (dynamicAdmins.includes(newAdmin)) return message.reply(`${newAdmin} already admin hai ✅`);
-            dynamicAdmins.push(newAdmin);
-            return message.reply(`${newAdmin} ko admin bana diya gaya ✅`);
-        }
-        if (text.startsWith("admin remove ")) {
-            const removeAdmin = text.replace("admin remove ", "").trim();
-            dynamicAdmins = dynamicAdmins.filter(a => a !== removeAdmin);
-            adminLoggedInUsers[removeAdmin] = false;
-            return message.reply(`${removeAdmin} ko admin se hata diya gaya ✅`);
-        }
-        if (text === "admin list") {
-            let reply = "👑 Superadmins (fixed):\n";
-            SUPERADMIN_PHONES.forEach(s => reply += `• ${s}\n`);
-            reply += "\n👤 Admins:\n";
-            reply += dynamicAdmins.length ? dynamicAdmins.map(a => `• ${a}`).join("\n") : "Koi admin nahi hai";
-            return message.reply(reply);
+    async function notifySuperAdmin(text) {
+        for (const phone of SUPERADMIN_PHONES) {
+            try { await sendMessage(phone + "@s.whatsapp.net", text); } catch (e) {}
         }
     }
 
-    // ===================== ADMIN COMMANDS =====================
-    if (isAdmin && isLoggedIn) {
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+        const message = messages[0];
+        if (!message?.message) return;
+        if (message.key.fromMe) return;
 
-        if (text === "list") {
-            const todayStr = new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
-            const todayList = Object.values(appointments).filter(a => a.date === todayStr);
-            if (!todayList.length) return message.reply(`Aaj (${todayStr}) ki koi appointment nahi hai`);
-            let reply = `📋 *Aaj ki Appointments (${todayStr}):*\n\n`;
-            todayList.sort((a, b) => a.token - b.token).forEach(a => { reply += `Token: *${a.token}*\nName: ${a.name}\nPhone: ${a.phone}\n\n`; });
-            return message.reply(reply);
+        const from = message.key.remoteJid;
+        if (from.endsWith("@g.us")) return;
+
+        const senderRaw = from;
+        const sender = getPhoneNumber(from);
+        const text = (message.message?.conversation || message.message?.extendedTextMessage?.text || "").toLowerCase().trim();
+
+        if (!text) return;
+
+        const isSuperAdmin = checkIsSuperAdmin(sender);
+        const isAdmin = checkIsAdmin(sender);
+        const isLoggedIn = adminLoggedInUsers[sender];
+
+        cleanOldAppointments();
+
+        const reply = (txt) => sendMessage(from, txt);
+
+        // ===================== JOIN ADMIN =====================
+        if (text === "join admin") {
+            if (checkIsAdmin(sender)) return reply("Aap pehle se admin hain ✅");
+            pendingAdmins[sender] = true;
+            await notifySuperAdmin(`🔔 *New Admin Request*\nNumber: ${sender}\n\nApprove:\napprove ${sender}\n\nReject:\ndisapprove ${sender}`);
+            return reply("Aapki admin request bhej di gayi hai ✅\nSuperadmin ke approve karne ka intezaar karein 🙏");
         }
 
-        if (text === "list full") {
-            const today = new Date(); today.setHours(0,0,0,0);
-            const futureList = Object.values(appointments).filter(a => {
-                const d = new Date(a.date + " " + new Date().getFullYear());
-                return d >= today;
-            });
-            if (!futureList.length) return message.reply("Koi upcoming appointment nahi hai");
-            const grouped = {};
-            futureList.forEach(a => { if (!grouped[a.date]) grouped[a.date] = []; grouped[a.date].push(a); });
-            let reply = "📋 *Aaj + Future Appointments:*\n\n";
-            Object.keys(grouped).sort().forEach(date => {
-                reply += `━━━ ${date} ━━━\n`;
-                grouped[date].sort((a, b) => a.token - b.token).forEach(a => { reply += `Token *${a.token}*: ${a.name} (${a.phone})\n`; });
-                reply += "\n";
-            });
-            return message.reply(reply);
+        // ===================== LOGIN =====================
+        if (isAdmin && text.startsWith("login")) {
+            const pin = text.split(" ")[1];
+            if (pin === ADMIN_PIN) {
+                adminLoggedInUsers[sender] = true;
+                let commands = `Admin login successful ✅\n\n📋 *Commands:*\n*list* — aaj ki appointments\n*list full* — aaj + future sab\n*list 12 april* — us din ki appointments\n*history* — last 7 din\n*limit 30* — daily limit change\n*close sunday* — din band\n*close 12 april* — date band\n*open sunday* — din kholo\n*open* — clinic kholo\n*close* — clinic band\n*delete [phone]* — appointment delete\n*delete old* — 7 din purane delete\n*reset* — sab reset`;
+                if (isSuperAdmin) commands += "\n\n👑 *Superadmin Commands:*\napprove [number]\ndisapprove [number]\npending\nadmin add [number]\nadmin remove [number]\nadmin list";
+                return reply(commands);
+            }
+            return reply("Wrong PIN ❌");
         }
 
-        if (text.startsWith("list ")) {
-            const dateStr = parseDate(text.replace("list ", "").trim());
-            if (!dateStr) return message.reply("❌ Date galat hai\nExample: list 12 april");
-            const dayList = Object.values(appointments).filter(a => a.date === dateStr);
-            if (!dayList.length) return message.reply(`${dateStr} ki koi appointment nahi hai`);
-            let reply = `📋 *${dateStr} ki Appointments:*\n\n`;
-            dayList.sort((a, b) => a.token - b.token).forEach(a => { reply += `Token: *${a.token}*\nName: ${a.name}\nPhone: ${a.phone}\n\n`; });
-            return message.reply(reply);
+        // ===================== SUPERADMIN COMMANDS =====================
+        if (isSuperAdmin && isLoggedIn) {
+            if (text.startsWith("approve ")) {
+                const num = text.replace("approve ", "").trim();
+                if (!pendingAdmins[num]) return reply(`${num} ki koi pending request nahi hai`);
+                dynamicAdmins.push(num);
+                delete pendingAdmins[num];
+                try { await sendMessage(num + "@s.whatsapp.net", "🎉 Aapki admin request approve ho gayi!\nAb *login 1234* likh ke admin panel use karein."); } catch (e) {}
+                return reply(`${num} ko admin bana diya gaya ✅`);
+            }
+            if (text.startsWith("disapprove ")) {
+                const num = text.replace("disapprove ", "").trim();
+                delete pendingAdmins[num];
+                try { await sendMessage(num + "@s.whatsapp.net", "❌ Aapki admin request reject kar di gayi."); } catch (e) {}
+                return reply(`${num} ki request reject kar di gayi ❌`);
+            }
+            if (text === "pending") {
+                const list = Object.keys(pendingAdmins);
+                if (!list.length) return reply("Koi pending request nahi hai");
+                return reply("⏳ Pending Requests:\n\n" + list.map(n => `• ${n}`).join("\n"));
+            }
+            if (text.startsWith("admin add ")) {
+                const newAdmin = text.replace("admin add ", "").trim();
+                if (dynamicAdmins.includes(newAdmin)) return reply(`${newAdmin} already admin hai ✅`);
+                dynamicAdmins.push(newAdmin);
+                return reply(`${newAdmin} ko admin bana diya gaya ✅`);
+            }
+            if (text.startsWith("admin remove ")) {
+                const removeAdmin = text.replace("admin remove ", "").trim();
+                dynamicAdmins = dynamicAdmins.filter(a => a !== removeAdmin);
+                adminLoggedInUsers[removeAdmin] = false;
+                return reply(`${removeAdmin} ko admin se hata diya gaya ✅`);
+            }
+            if (text === "admin list") {
+                let replyText = "👑 Superadmins (fixed):\n";
+                SUPERADMIN_PHONES.forEach(s => replyText += `• ${s}\n`);
+                replyText += "\n👤 Admins:\n";
+                replyText += dynamicAdmins.length ? dynamicAdmins.map(a => `• ${a}`).join("\n") : "Koi admin nahi hai";
+                return reply(replyText);
+            }
         }
 
-        if (text === "history") {
-            if (!Object.keys(appointments).length) return message.reply("Koi appointment nahi mili (7 din mein)");
-            const grouped = {};
-            Object.values(appointments).forEach(a => { if (!grouped[a.date]) grouped[a.date] = []; grouped[a.date].push(a); });
-            let reply = "📅 *Last 7 Days:*\n\n";
-            Object.keys(grouped).sort().forEach(date => {
-                reply += `━━━ ${date} ━━━\n`;
-                grouped[date].sort((a, b) => a.token - b.token).forEach(a => { reply += `Token ${a.token}: ${a.name} (${a.phone})\n`; });
-                reply += "\n";
-            });
-            return message.reply(reply);
+        // ===================== ADMIN COMMANDS =====================
+        if (isAdmin && isLoggedIn) {
+            if (text === "list") {
+                const todayStr = new Date().toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
+                const todayList = Object.values(appointments).filter(a => a.date === todayStr);
+                if (!todayList.length) return reply(`Aaj (${todayStr}) ki koi appointment nahi hai`);
+                let r = `📋 *Aaj ki Appointments (${todayStr}):*\n\n`;
+                todayList.sort((a, b) => a.token - b.token).forEach(a => { r += `Token: *${a.token}*\nName: ${a.name}\nPhone: ${a.phone}\n\n`; });
+                return reply(r);
+            }
+            if (text === "list full") {
+                const today = new Date(); today.setHours(0,0,0,0);
+                const futureList = Object.values(appointments).filter(a => {
+                    const d = new Date(a.date + " " + new Date().getFullYear());
+                    return d >= today;
+                });
+                if (!futureList.length) return reply("Koi upcoming appointment nahi hai");
+                const grouped = {};
+                futureList.forEach(a => { if (!grouped[a.date]) grouped[a.date] = []; grouped[a.date].push(a); });
+                let r = "📋 *Aaj + Future Appointments:*\n\n";
+                Object.keys(grouped).sort().forEach(date => {
+                    r += `━━━ ${date} ━━━\n`;
+                    grouped[date].sort((a, b) => a.token - b.token).forEach(a => { r += `Token *${a.token}*: ${a.name} (${a.phone})\n`; });
+                    r += "\n";
+                });
+                return reply(r);
+            }
+            if (text.startsWith("list ")) {
+                const dateStr = parseDate(text.replace("list ", "").trim());
+                if (!dateStr) return reply("❌ Date galat hai\nExample: list 12 april");
+                const dayList = Object.values(appointments).filter(a => a.date === dateStr);
+                if (!dayList.length) return reply(`${dateStr} ki koi appointment nahi hai`);
+                let r = `📋 *${dateStr} ki Appointments:*\n\n`;
+                dayList.sort((a, b) => a.token - b.token).forEach(a => { r += `Token: *${a.token}*\nName: ${a.name}\nPhone: ${a.phone}\n\n`; });
+                return reply(r);
+            }
+            if (text === "history") {
+                if (!Object.keys(appointments).length) return reply("Koi appointment nahi mili (7 din mein)");
+                const grouped = {};
+                Object.values(appointments).forEach(a => { if (!grouped[a.date]) grouped[a.date] = []; grouped[a.date].push(a); });
+                let r = "📅 *Last 7 Days:*\n\n";
+                Object.keys(grouped).sort().forEach(date => {
+                    r += `━━━ ${date} ━━━\n`;
+                    grouped[date].sort((a, b) => a.token - b.token).forEach(a => { r += `Token ${a.token}: ${a.name} (${a.phone})\n`; });
+                    r += "\n";
+                });
+                return reply(r);
+            }
+            if (text === "delete old") {
+                const before = Object.keys(appointments).length;
+                cleanOldAppointments();
+                const after = Object.keys(appointments).length;
+                return reply(`${before - after} purani appointments delete ho gayi ✅`);
+            }
+            if (text.startsWith("delete ")) {
+                const phone = text.replace("delete ", "").trim();
+                const keys = Object.keys(appointments).filter(k => k.startsWith(phone));
+                if (!keys.length) return reply(`${phone} ki koi appointment nahi mili ❌`);
+                keys.forEach(k => delete appointments[k]);
+                return reply(`${phone} ki appointment(s) delete ho gayi ✅`);
+            }
+            if (text === "reset") { tokenCounter = {}; appointments = {}; return reply("Tokens reset successfully ✅"); }
+            if (text.startsWith("limit")) {
+                const newLimit = parseInt(text.split(" ")[1]);
+                if (!newLimit) return reply("Invalid number");
+                dailyLimit = newLimit;
+                return reply(`Daily limit set to ${dailyLimit} ✅`);
+            }
+            if (text.startsWith("close ")) {
+                const value = text.replace("close ", "").trim();
+                if (value.match(/[0-9]/)) { closedDates.push(value); return reply(`${value} closed ❌`); }
+                closedDays.push(value);
+                return reply(`${value} closed ❌`);
+            }
+            if (text.startsWith("open ")) {
+                const value = text.replace("open ", "").trim();
+                closedDays = closedDays.filter(d => d !== value);
+                closedDates = closedDates.filter(d => d !== value);
+                return reply(`${value} opened ✅`);
+            }
+            if (text === "close") { clinicOpen = false; return reply("Clinic closed ❌"); }
+            if (text === "open") { clinicOpen = true; return reply("Clinic open ✅"); }
+            return;
         }
 
-        if (text === "delete old") {
-            const before = Object.keys(appointments).length;
-            cleanOldAppointments();
-            const after = Object.keys(appointments).length;
-            return message.reply(`${before - after} purani appointments delete ho gayi ✅`);
+        // ===================== USER FLOW =====================
+        if (!clinicOpen) return reply(t(senderRaw, "closed"));
+
+        const today = new Date();
+        const todayDay = today.toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
+        const todayDate = today.toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
+
+        if (closedDays.includes(todayDay)) return reply(t(senderRaw, "closedDay", todayDay));
+        if (closedDates.includes(todayDate)) return reply(t(senderRaw, "closedDate", todayDate));
+
+        if (userState[senderRaw] && userState[senderRaw].step === 0) {
+            if (text === 'hindi') { userLang[senderRaw] = 'hi'; userState[senderRaw] = { step: 1 }; return reply(msg.hi.welcome); }
+            if (text === 'english') { userLang[senderRaw] = 'en'; userState[senderRaw] = { step: 1 }; return reply(msg.en.welcome); }
+            return reply(msg.hi.selectLang);
         }
 
-        if (text.startsWith("delete ")) {
-            const phone = text.replace("delete ", "").trim();
-            const keys = Object.keys(appointments).filter(k => k.startsWith(phone));
-            if (!keys.length) return message.reply(`${phone} ki koi appointment nahi mili ❌`);
-            keys.forEach(k => delete appointments[k]);
-            return message.reply(`${phone} ki appointment(s) delete ho gayi ✅`);
-        }
+        if (userState[senderRaw] && userState[senderRaw].step >= 1) {
+            if (userState[senderRaw].step === 1) {
+                userState[senderRaw].name = message.message?.conversation || message.message?.extendedTextMessage?.text || "";
+                userState[senderRaw].step = 2;
+                return reply(t(senderRaw, 'askPhone'));
+            }
+            if (userState[senderRaw].step === 2) {
+                userState[senderRaw].phone = message.message?.conversation || message.message?.extendedTextMessage?.text || "";
+                userState[senderRaw].step = 3;
+                return reply(t(senderRaw, 'askDate'));
+            }
+            if (userState[senderRaw].step === 3) {
+                const requestedDate = (message.message?.conversation || message.message?.extendedTextMessage?.text || "").trim().toLowerCase();
+                const parsedDate = parseDate(requestedDate);
+                const saveDate = parsedDate || new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long' }).toLowerCase();
 
-        if (text === "reset") { tokenCounter = {}; appointments = {}; return message.reply("Tokens reset successfully ✅"); }
-
-        if (text.startsWith("limit")) {
-            const newLimit = parseInt(text.split(" ")[1]);
-            if (!newLimit) return message.reply("Invalid number");
-            dailyLimit = newLimit;
-            return message.reply(`Daily limit set to ${dailyLimit} ✅`);
-        }
-
-        if (text.startsWith("close ")) {
-            const value = text.replace("close ", "").trim();
-            if (value.match(/[0-9]/)) { closedDates.push(value); return message.reply(`${value} closed ❌`); }
-            closedDays.push(value);
-            return message.reply(`${value} closed ❌`);
-        }
-        if (text.startsWith("open ")) {
-            const value = text.replace("open ", "").trim();
-            closedDays = closedDays.filter(d => d !== value);
-            closedDates = closedDates.filter(d => d !== value);
-            return message.reply(`${value} opened ✅`);
-        }
-        if (text === "close") { clinicOpen = false; return message.reply("Clinic closed ❌"); }
-        if (text === "open") { clinicOpen = true; return message.reply("Clinic open ✅"); }
-        return;
-    }
-
-    // ===================== USER FLOW =====================
-    if (!clinicOpen) return message.reply(t(senderRaw, "closed"));
-
-    const today = new Date();
-    const todayDay = today.toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
-    const todayDate = today.toLocaleDateString("en-US", { day: "numeric", month: "long" }).toLowerCase();
-
-    if (closedDays.includes(todayDay)) return message.reply(t(senderRaw, "closedDay", todayDay));
-    if (closedDates.includes(todayDate)) return message.reply(t(senderRaw, "closedDate", todayDate));
-
-    if (userState[senderRaw] && userState[senderRaw].step === 0) {
-        if (text === 'hindi') { userLang[senderRaw] = 'hi'; userState[senderRaw] = { step: 1 }; return message.reply(msg.hi.welcome); }
-        if (text === 'english') { userLang[senderRaw] = 'en'; userState[senderRaw] = { step: 1 }; return message.reply(msg.en.welcome); }
-        return message.reply(msg.hi.selectLang);
-    }
-
-    if (userState[senderRaw] && userState[senderRaw].step >= 1) {
-        if (userState[senderRaw].step === 1) {
-            userState[senderRaw].name = message.body;
-            userState[senderRaw].step = 2;
-            return message.reply(t(senderRaw, 'askPhone'));
-        }
-        if (userState[senderRaw].step === 2) {
-            userState[senderRaw].phone = message.body;
-            userState[senderRaw].step = 3;
-            return message.reply(t(senderRaw, 'askDate'));
-        }
-        if (userState[senderRaw].step === 3) {
-            const requestedDate = message.body.trim().toLowerCase();
-            const parsedDate = parseDate(requestedDate);
-            const saveDate = parsedDate || new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long' }).toLowerCase();
-
-            if (!tokenCounter[saveDate]) tokenCounter[saveDate] = 1;
-            if (tokenCounter[saveDate] > dailyLimit) {
+                if (!tokenCounter[saveDate]) tokenCounter[saveDate] = 1;
+                if (tokenCounter[saveDate] > dailyLimit) {
+                    delete userState[senderRaw];
+                    delete userLang[senderRaw];
+                    return reply(t(senderRaw, 'full'));
+                }
+                const token = tokenCounter[saveDate]++;
+                appointments[userState[senderRaw].phone + '_' + Date.now()] = {
+                    name: userState[senderRaw].name,
+                    phone: userState[senderRaw].phone,
+                    date: saveDate,
+                    token,
+                    timestamp: Date.now()
+                };
                 delete userState[senderRaw];
                 delete userLang[senderRaw];
-                return message.reply(t(senderRaw, 'full'));
+                return reply(t(senderRaw, 'confirmed', token));
             }
-            const token = tokenCounter[saveDate]++;
-            appointments[userState[senderRaw].phone + '_' + Date.now()] = {
-                name: userState[senderRaw].name,
-                phone: userState[senderRaw].phone,
-                date: saveDate,
-                token,
-                timestamp: Date.now()
-            };
-            delete userState[senderRaw];
-            delete userLang[senderRaw];
-            return message.reply(t(senderRaw, 'confirmed', token));
+            return;
         }
-        return;
-    }
 
-    if (isTriggerWord(text)) { userState[senderRaw] = { step: 0 }; return message.reply(msg.hi.selectLang); }
-});
-
-    client.initialize();
+        if (isTriggerWord(text)) { userState[senderRaw] = { step: 0 }; return reply(msg.hi.selectLang); }
+    });
 }
 
 startBot();
